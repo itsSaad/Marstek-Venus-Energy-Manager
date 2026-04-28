@@ -85,6 +85,7 @@ from .const import (
     CONF_METER_INVERTED,
     CONF_PREDICTIVE_SAFETY_MARGIN_KWH,
     DEFAULT_PREDICTIVE_SAFETY_MARGIN_KWH,
+    MAX_POWER_BY_VERSION,
 )
 from .coordinator import MarstekVenusDataUpdateCoordinator
 from .non_responsive_tracker import NonResponsiveTracker
@@ -1727,23 +1728,34 @@ class ChargeDischargeController:
 
         # Select minimum batteries needed
         selected = []
-        combined_capacity = 0
+        combined_hw_capacity = 0
+        combined_slider_capacity = 0
 
         for battery in sorted_batteries:
             selected.append(battery)
-            limit = battery.max_charge_power if is_charging else battery.max_discharge_power
-            combined_capacity += limit
+            hw_limit = MAX_POWER_BY_VERSION.get(battery.battery_version, 2500)
+            slider_limit = battery.max_charge_power if is_charging else battery.max_discharge_power
+            combined_hw_capacity += hw_limit
+            combined_slider_capacity += slider_limit
 
-            if total_power <= combined_capacity * ACTIVATION_THRESHOLD:
+            # Stop adding batteries only when both conditions are met:
+            # 1. HW-rated capacity covers demand at the efficiency threshold (inverter efficiency is a
+            #    function of load vs hardware rating, not vs the user-configured soft cap)
+            # 2. Combined slider capacity can actually deliver total_power
+            if (total_power <= combined_hw_capacity * ACTIVATION_THRESHOLD
+                    and total_power <= combined_slider_capacity):
                 break
 
         # Power hysteresis: can we remove the last battery added?
         if len(selected) > 1 and len(previous_active) > 0:
             last = selected[-1]
-            last_limit = last.max_charge_power if is_charging else last.max_discharge_power
-            capacity_without_last = combined_capacity - last_limit
+            last_hw_limit = MAX_POWER_BY_VERSION.get(last.battery_version, 2500)
+            last_slider_limit = last.max_charge_power if is_charging else last.max_discharge_power
+            hw_capacity_without_last = combined_hw_capacity - last_hw_limit
+            slider_capacity_without_last = combined_slider_capacity - last_slider_limit
 
-            if (total_power <= capacity_without_last * DEACTIVATION_THRESHOLD
+            if (total_power <= hw_capacity_without_last * DEACTIVATION_THRESHOLD
+                    and total_power <= slider_capacity_without_last
                     and last not in previous_active):
                 selected.pop()
 
